@@ -1,0 +1,20 @@
+# Fly.io app config for flowgate.
+# app name is placeholder — `flyctl launch` will prompt to set/confirm it,
+# or edit the line below before running `flyctl deploy`.
+app = "flowgate-pramathesh"
+primary_region = "sjc" # San Jose — closest region to Fremont, CA
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # keep it running continuously, not scale-to-zero —
+                                # the whole point is a service you can say you "run"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
