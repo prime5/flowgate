@@ -38,18 +38,33 @@ safety, so the race detector isn't optional):
 go test ./... -race
 ```
 
+## Deployed and load-tested
+
+- **Deploy (Fly.io)** — live at `https://flowgate-pramathesh.fly.dev`
+  (`fly.toml`, 2 machines, region `sjc`).
+- **Load test (k6)** — `loadtest.js` run 2026-09-11 against the live
+  deployment: ramp to 300 VUs, 303,761 requests, ~2,025 req/s sustained.
+  264,971 succeeded, 33,322 shed (503, ~11%), 5,468 backend errors (~1.8%,
+  matches the intentional simulated rate), **0 rate-limited (429)** — see
+  `POSTMORTEM.md` for why, and the SLOs below for what this run established.
+
+## SLOs (defined from the 2026-09-11 k6 run, not from theory)
+
+| SLO | Target | Measured | Status |
+|---|---|---|---|
+| p95 request latency under ~2,000 req/s sustained | ≤ 150ms | 102ms | Met |
+| Gateway responds to every request (no timeout/reset) | 100% | 100% | Met |
+| Backend success rate for admitted (non-shed) requests | ≥ 95% | 97.98% | Met |
+| Load shedding engages before the gateway itself degrades | shed, don't queue, above 50 in-flight | ~11% shed, latency stayed flat | Met |
+| Per-client rate limit enforced (5 req/s sustained) | 429s appear for over-limit clients | 0 429s in 303,761 requests | **Not met** — see `POSTMORTEM.md` |
+
 ## What's prepared but NOT yet done
 
-- **Deploy (Fly.io)** — `Dockerfile` and `fly.toml` are here and untested
-  against a real Fly.io account. Running `flyctl launch` / `flyctl deploy`
-  is the next step, from a terminal that already has `flyctl` authenticated.
-- **Load test (k6)** — `loadtest.js` is written (ramps to 300 VUs against
-  `/work`, on purpose past the default rate-limit and shedder capacity) but
-  has not been run against anything yet — not localhost, not deployed.
-- **SLOs from measured data, deliberate failure, postmortem** — cannot exist
-  honestly until the load test above has actually run and produced real
-  numbers. Nothing here should be described as "load-tested" or "operating
-  under defined SLOs" until this section is filled in with real k6 output.
+- **Fix the rate limiter's client-key derivation** — it currently keys on
+  `r.RemoteAddr`, which doesn't reliably identify the real client behind
+  Fly.io's proxy layer. `POSTMORTEM.md` has the root cause and the fix
+  (key on the `Fly-Client-IP` header, falling back to `RemoteAddr`), plus a
+  re-run to confirm 429s show up once it's fixed.
 
 ## Design notes
 
