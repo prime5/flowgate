@@ -6,6 +6,7 @@
 package ratelimit
 
 import (
+	"net"
 	"net/http"
 	"time"
 
@@ -25,15 +26,29 @@ type Config struct {
 	KeyFunc func(*http.Request) string
 }
 
+func defaultKeyFunc(r *http.Request) string {
+	if ip := r.Header.Get("Fly-Client-IP"); ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// Wrap returns next wrapped with load shedding, per-key rate limiting
+// and circuit breaking, in that order, each instrumented with metrics.
 // Wrap returns next wrapped with load shedding, per-key rate limiting
 // and circuit breaking, in that order, each instrumented with metrics.
 func Wrap(cfg Config, next http.Handler) http.Handler {
 	keyFunc := cfg.KeyFunc
 	if keyFunc == nil {
-		keyFunc = func(r *http.Request) string { return r.RemoteAddr }
+		keyFunc = defaultKeyFunc
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
 		metrics.InFlight.Set(float64(cfg.Shedder.InFlight()))
 
 		if !cfg.Shedder.Acquire() {
