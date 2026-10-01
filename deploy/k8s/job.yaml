@@ -1,0 +1,37 @@
+# Runs the sync-stall k6 experiment as a Kubernetes Job against
+# the in-cluster flowgate Service: load generation as code, in the
+# same cluster as the system under test, the way a load-and-fault
+# team's shared tooling would run it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flowgate-sync-stall
+  labels:
+    app: flowgate
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: flowgate-k6   # not app=flowgate: the Service must not route to this pod
+        job: sync-stall
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: k6
+        # Official k6 image; the script is mounted from a ConfigMap
+        # (see scripts/ephemeral-env.sh for the one-command setup).
+        image: grafana/k6:0.55.0
+        command: ["k6", "run", "/scripts/sync-stall.js"]
+        env:
+        - name: BASE_URL
+          value: "http://flowgate:8080"
+        - name: K6_VUS
+          value: "30"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      volumes:
+      - name: scripts
+        configMap:
+          name: flowgate-k6-scripts

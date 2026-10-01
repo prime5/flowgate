@@ -58,6 +58,38 @@ go test ./... -race
 | Load shedding engages before the gateway itself degrades | shed, don't queue, above 50 in-flight | ~11% shed, latency stayed flat | Met |
 | Per-client rate limit enforced (5 req/s sustained) | 429s appear for over-limit clients | 0 429s in 303,761 requests | **Not met** — see `POSTMORTEM.md` |
 
+## Resilience experiments (`resilience-experiments` branch)
+
+A fault-injection playground on top of the gateway, shaped by three
+real systems from my background. Every experiment has a steady
+state, one fault, a blast radius, and a rollback — see
+`INTERVIEW.md` for the narration.
+
+- **Directory sync as a resizable worker pool** (`internal/pool`,
+  `POST /sync`, `GET /sync/status`, `POST /scale?replicas=N`).
+  Workers are pods; scaling is `kubectl scale`. Under-provision it
+  and the backlog grows until batches miss their window — the
+  Cloud Identity Engine pod-capacity incident, reproducible on
+  demand. Scaling back up drains it; `deploy/k8s/hpa.yaml`
+  automates the fix.
+- **MPP fan-out query** (`internal/fanout`, `GET /query`): scatter
+  work across shards, gather results. Fault primitives are a
+  straggler shard (`&straggler=3&straggler_ms=500`) and a hot
+  partition (`&skew=0.9`) — query latency is the *max* of the
+  shards, so one bad shard dominates.
+- **Experiment runner** (`internal/exp`, `POST
+  /experiments/pod-kill`): steady-state hypothesis, one injected
+  fault, declared blast radius, guaranteed rollback, bounded
+  recovery window, verdict as JSON. `experiments/sync-stall.js` is
+  the 75-second k6 version (baseline → fault → recovery, with
+  per-phase drop thresholds); `scripts/ephemeral-env.sh` runs
+  everything on a throwaway kind cluster; `scripts/pod-kill.sh`
+  deletes real pods with a blast-radius guard.
+- New metrics: `flowgate_sync_queue_depth`, `flowgate_sync_replicas`.
+- Known limits: pool workers are goroutines, not pods (the k8s
+  manifests run real pods); backend latency is simulated, queue
+  dynamics are real.
+
 ## What's prepared but NOT yet done
 
 - **Fix the rate limiter's client-key derivation** — it currently keys on

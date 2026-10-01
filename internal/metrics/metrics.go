@@ -73,6 +73,15 @@ var (
 
 	// InFlight reports how many requests currently occupy a shedder slot.
 	InFlight = &gauge{}
+
+	// SyncQueueDepth reports how many directory-sync batches are
+	// waiting for a worker: the backlog that grows during the
+	// under-provisioned stall.
+	SyncQueueDepth = &gauge{}
+
+	// SyncReplicas reports the current worker count of the sync
+	// pool — the "kubectl scale" dimension.
+	SyncReplicas = &gauge{}
 )
 
 // Register exists to keep call sites symmetric with libraries that
@@ -104,6 +113,14 @@ func WriteTo(w io.Writer) error {
 
 	fmt.Fprintf(w, "# HELP flowgate_in_flight_requests Current number of requests occupying a shedder slot.\n")
 	fmt.Fprintf(w, "# TYPE flowgate_in_flight_requests gauge\n")
-	_, err := fmt.Fprintf(w, "flowgate_in_flight_requests %v\n", InFlight.Get())
+	fmt.Fprintf(w, "flowgate_in_flight_requests %v\n", InFlight.Get())
+
+	fmt.Fprintf(w, "# HELP flowgate_sync_queue_depth Directory-sync batches waiting for a worker.\n")
+	fmt.Fprintf(w, "# TYPE flowgate_sync_queue_depth gauge\n")
+	fmt.Fprintf(w, "flowgate_sync_queue_depth %v\n", SyncQueueDepth.Get())
+
+	fmt.Fprintf(w, "# HELP flowgate_sync_replicas Current worker count of the directory-sync pool.\n")
+	fmt.Fprintf(w, "# TYPE flowgate_sync_replicas gauge\n")
+	_, err := fmt.Fprintf(w, "flowgate_sync_replicas %v\n", SyncReplicas.Get())
 	return err
 }
