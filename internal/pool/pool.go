@@ -1,10 +1,22 @@
-// Package pool is a dynamically resizable worker pool. It models a
-// Kubernetes Deployment's replica set: SetSize is "kubectl scale",
-// each worker is a pod, and the pending queue is the backlog that
-// grows when replicas can't keep up with arrival rate — the shape of
-// the Cloud Identity Engine directory-sync stall, where too few pods
-// for the sync load meant the queue grew until the sync window was
-// missed, and adding pods was the fix.
+// Package pool is a dynamically resizable in-process worker pool:
+// goroutines reading from a bounded channel, with SetSize adding or
+// stopping them at runtime.
+//
+// It is an in-process model, not an orchestrator. The workers are
+// goroutines, not pods; SetSize changes this process's own
+// concurrency and does not call Kubernetes. The real Kubernetes layer
+// lives in deploy/k8s (Deployment, HPA, k6 Job) and
+// scripts/pod-kill.sh, which act on actual pods.
+//
+// What the model does reproduce is the dynamic behind the Cloud
+// Identity Engine directory-sync stall: when processing capacity is
+// below the arrival rate, the queue grows monotonically until batches
+// miss their window, and the fix is to raise capacity. That
+// relationship between capacity, arrival rate and backlog is the same
+// whether the unit of capacity is a goroutine or a pod, which is why
+// an in-process pool is enough to make the failure deterministic and
+// reproducible on demand. The queue dynamics are real; the processing
+// time is simulated.
 package pool
 
 import (
@@ -47,9 +59,14 @@ func New(work time.Duration, queueCap int) *Pool {
 	return &Pool{jobs: make(chan job, queueCap), work: work}
 }
 
-// SetSize scales the pool to n workers, like
-// `kubectl scale deployment/flowgate --replicas=n`.
-// It returns the previous size.
+// SetSize changes the pool to n worker goroutines, starting or
+// stopping them as needed, and returns the previous size. Stopping is
+// graceful: a worker finishes the job in hand before exiting.
+//
+// This is the in-process analogue of changing a deployment's replica
+// count — it varies processing capacity against a fixed arrival rate —
+// but it is goroutines in this process, not pods, and it calls no
+// orchestrator.
 func (p *Pool) SetSize(n int) (prev int) {
 	if n < 1 {
 		n = 1

@@ -3,14 +3,19 @@
 // with Prometheus metrics exposed for observability.
 //
 // The resilience-experiment endpoints (/sync, /scale, /query,
-// /experiments/...) model production-shaped topologies: a
-// Kubernetes-style replica pool for directory sync (the Cloud
-// Identity Engine pod story), an MPP fan-out query (the Greenplum
+// /experiments/...) model production-shaped topologies: an
+// in-process worker pool for directory sync (the Cloud Identity
+// Engine capacity story), an MPP fan-out query (the Greenplum
 // story), and a fault-injection experiment runner with
 // steady-state hypotheses, blast-radius limits, and rollback.
+//
+// Faults themselves come from internal/fault, so an experiment's
+// Inject closure is a primitive being switched on rather than a
+// bespoke function written for that one experiment.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math/rand"
@@ -24,6 +29,7 @@ import (
 	"github.com/prime5/flowgate/internal/breaker"
 	"github.com/prime5/flowgate/internal/exp"
 	"github.com/prime5/flowgate/internal/fanout"
+	"github.com/prime5/flowgate/internal/fault"
 	"github.com/prime5/flowgate/internal/limiter"
 	"github.com/prime5/flowgate/internal/metrics"
 	"github.com/prime5/flowgate/internal/pool"
@@ -53,15 +59,26 @@ func main() {
 		w.Write([]byte("ok\n"))
 	})
 
-	// Directory-sync pool: workers are pods, SetSize is kubectl
-	// scale. Under-provision it and the backlog grows until batches
-	// miss their window — the incident this models.
+	// Directory-sync pool: in-process worker goroutines, not pods.
+	// Under-provision it against the arrival rate and the backlog
+	// grows until batches miss their window — the dynamic behind the
+	// real incident, made reproducible. deploy/k8s runs the same
+	// shape against actual pods.
 	syncPool := pool.New(envDur("SYNC_WORK_MS", 25), envInt("SYNC_QUEUE_CAP", 1000))
 	syncPool.SetSize(envInt("SYNC_REPLICAS", 2))
 	metrics.SyncReplicas.Set(float64(syncPool.Size()))
 
 	mux := http.NewServeMux()
-	mux.Handle("/work", ratelimit.Wrap(cfg, backend))
+	// backendFault is a fault primitive sitting between the gateway's
+	// defenses and the backend, switched off until an experiment turns
+	// it on. Placing it inside ratelimit.Wrap rather than outside is
+	// deliberate: the shedder, limiter and breaker see the request
+	// first, so an injected delay is the *dependency* being slow,
+	// which is exactly the condition the breaker exists to survive.
+	backendFault := fault.NewToggle(
+		fault.Latency(envDur("FAULT_LATENCY_MS", 250), fault.Always()),
+	)
+	mux.Handle("/work", ratelimit.Wrap(cfg, fault.Middleware(backendFault)(backend)))
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		metrics.SyncQueueDepth.Set(float64(syncPool.Stats().Queued))
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -102,8 +119,9 @@ func main() {
 		})
 	})
 
-	// POST /scale?replicas=N — kubectl scale, with a blast-radius
-	// guard: never below 1, never above 32 on this box.
+	// POST /scale?replicas=N — resize this process's sync worker pool
+	// (goroutines, not pods), with a blast-radius guard: never below
+	// 1, never above 32 on this box.
 	mux.HandleFunc("/scale", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -158,11 +176,17 @@ func main() {
 		})
 	})
 
-	// POST /experiments/pod-kill — the chaos experiment: seed load,
-	// kill two-thirds of the sync replicas mid-run (blast radius
-	// 0.67), hold, roll back, verify recovery. Returns the verdict
-	// as JSON. One experiment at a time: two overlapping runs would
-	// fight over the same pool and both verdicts would be noise.
+	// POST /experiments/pod-kill — seed load, remove two-thirds of the
+	// sync workers mid-run (blast radius 0.67), hold, roll back,
+	// verify recovery. Returns the verdict as JSON. One experiment at
+	// a time: two overlapping runs would fight over the same pool and
+	// both verdicts would be noise.
+	//
+	// The fault is fault.Capacity — a resource-level fault rather than
+	// a call-level Primitive, because removing capacity perturbs no
+	// individual call; it changes the rate at which all of them are
+	// served. Apply already returns its own restore function, so the
+	// experiment's Inject closure is the fault itself.
 	var experimentMu sync.Mutex
 	mux.HandleFunc("/experiments/pod-kill", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -187,19 +211,24 @@ func main() {
 			}
 		}()
 
+		// The capacity fault: drop to 2 workers, restore on rollback.
+		// setReplicas is the resizer the fault drives — it applies the
+		// new size, keeps the metric honest, and returns the previous
+		// size, which is the contract fault.Capacity expects.
+		setReplicas := func(n int) int {
+			prev := syncPool.SetSize(n)
+			metrics.SyncReplicas.Set(float64(syncPool.Size()))
+			log.Printf("experiment: sync workers %d -> %d", prev, n)
+			return prev
+		}
+		capacityFault := fault.Capacity("capacity", setReplicas, 2)
+
 		v := exp.Run(exp.Experiment{
 			Name:        "pod-kill: lose two-thirds of sync replicas under load",
 			SteadyState: func() bool { return syncPool.Stats().Queued < 50 },
-			Inject: func() func() {
-				syncPool.SetSize(2)
-				metrics.SyncReplicas.Set(2)
-				log.Printf("experiment: injected fault, replicas 6 -> 2")
-				return func() {
-					syncPool.SetSize(full)
-					metrics.SyncReplicas.Set(float64(full))
-					log.Printf("experiment: rolled back, replicas 2 -> 6")
-				}
-			},
+			// Apply has the exp.Fault signature already: inject, and
+			// hand back the function that undoes it.
+			Inject:          capacityFault.Apply,
 			BlastRadius:     float64(full-2) / float64(full),
 			Duration:        8 * time.Second,
 			RecoveryTimeout: 5 * time.Second,
@@ -207,6 +236,53 @@ func main() {
 
 		syncPool.SetSize(original)
 		metrics.SyncReplicas.Set(float64(original))
+		writeJSON(w, http.StatusOK, v)
+	})
+
+	// POST /experiments/backend-latency — the primitive-driven
+	// experiment. The fault is internal/fault's Latency primitive,
+	// already wired in front of the backend and switched off; the
+	// experiment's whole Inject closure is Toggle.On, whose return
+	// value is the rollback. Nothing bespoke is written per
+	// experiment, which is the point of a primitives library.
+	//
+	// Steady state: a representative backend call completes inside the
+	// 100ms budget. The injected delay is larger than the budget, so
+	// the hypothesis should be violated while the fault is on and hold
+	// again once it is rolled back.
+	mux.HandleFunc("/experiments/backend-latency", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !experimentMu.TryLock() {
+			http.Error(w, "an experiment is already running", http.StatusConflict)
+			return
+		}
+		defer experimentMu.Unlock()
+
+		const budget = 100 * time.Millisecond
+		probe := func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*budget)
+			defer cancel()
+			start := time.Now()
+			err := backendFault.Inject(ctx, func(context.Context) error { return nil })
+			return err == nil && time.Since(start) < budget
+		}
+
+		v := exp.Run(exp.Experiment{
+			Name:        "backend-latency: slow dependency behind the gateway",
+			SteadyState: probe,
+			// The Toggle's On already has the Fault signature:
+			// flip on, hand back the function that flips it off.
+			Inject: backendFault.On,
+			// Always() samples every call, so the fault reaches all
+			// traffic through this primitive.
+			BlastRadius:     1.0,
+			Duration:        3 * time.Second,
+			RecoveryTimeout: 2 * time.Second,
+		}, 200*time.Millisecond)
+
 		writeJSON(w, http.StatusOK, v)
 	})
 
