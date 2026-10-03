@@ -1,3 +1,7 @@
 
 # Private: interview prep notes, never commit.
 INTERVIEW.md
+
+# Anything under private/ is ignored, so a new note is safe by default
+# rather than safe only if you remember to add it here.
+private/
