@@ -3,7 +3,7 @@
 A small reliability gateway: token-bucket rate limiting, a circuit breaker, and
 load shedding in front of a backend handler, with a hand-rolled Prometheus
 `/metrics` endpoint. Built to learn Go by building and running something real,
-not just to pass a tutorial.
+not just to pass a tutorial. In layman's terms: flowgate is a project I built and actually deployed online. Think of it as a smart front door for a web service. When a flood of requests arrives, it decides who gets in, who waits, and when to stop accepting visitors so the building itself doesn't collapse. Then I added a chaos-testing playground on top: I can deliberately break parts of it — shut down servers mid-rush, slow down one database — and watch exactly how it behaves, with automatic recovery. It's modeled on real incidents I handled, like a sync system at Palo Alto Networks that stalled when it ran out of server capacity.
 
 ## What's implemented (code, tested, race-checked)
 
