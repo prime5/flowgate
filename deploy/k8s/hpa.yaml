@@ -1,0 +1,38 @@
+# The real "add more pods" fix, automated: scale flowgate from 2
+# to 10 pods on CPU pressure. In an interview this is the answer to
+# "how would this recover in production?" — the HPA, not a human
+# running kubectl at 2am. Requires metrics-server in the cluster
+# (scripts/ephemeral-env.sh installs it on kind).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: flowgate
+  labels:
+    app: flowgate
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: flowgate
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 15
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
