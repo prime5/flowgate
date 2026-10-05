@@ -51,7 +51,11 @@ not just to pass a tutorial.
   `POST /experiments/pod-kill` and `POST /experiments/backend-latency`,
   each one steady-state check, one fault, one rollback. Only `/work`
   goes through the middleware chain; the rest are lab surface and
-  bypass the limiter, shedder and breaker.
+  bypass the limiter, shedder and breaker. `/scale` and `/experiments/*`
+  mutate live state, so they are registered only when `FLOWGATE_LAB=1`
+  and return 404 otherwise: `/metrics` is what the SLOs below are
+  measured from, and those numbers are only attributable if nothing
+  outside the process can move them.
 - `cmd/faultdemo` — runs `internal/fault` and narrates each step, so the
   library's behaviour is observable without reading the tests.
 - `cmd/flowgate-mcp` — the MCP entry point: exposes the experiment
@@ -67,6 +71,14 @@ go build -o flowgate ./cmd/flowgate
 PORT=8080 ./flowgate
 curl localhost:8080/work
 curl localhost:8080/metrics
+```
+
+The lab endpoints are off by default. To run the experiments locally —
+`experiments/sync-stall.js` POSTs `/scale`, so without the flag the
+fault never bites and its `count>0` threshold fails:
+
+```
+FLOWGATE_LAB=1 PORT=8080 ./flowgate
 ```
 
 Run the tests (with the race detector — this project promises concurrency

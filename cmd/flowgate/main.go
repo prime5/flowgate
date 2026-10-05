@@ -68,6 +68,20 @@ func main() {
 	syncPool.SetSize(envInt("SYNC_REPLICAS", 2))
 	metrics.SyncReplicas.Set(float64(syncPool.Size()))
 
+	// Lab endpoints mutate live state: /scale resizes the worker pool and
+	// the /experiments/* handlers inject faults. They are registered only
+	// when FLOWGATE_LAB=1, so the public deploy does not expose them.
+	// The reason is evidence, not secrecy: /metrics is what the SLOs in
+	// the README are measured from, and those numbers are only
+	// attributable if nothing outside this process can move them.
+	labOn := os.Getenv("FLOWGATE_LAB") == "1"
+	labOnly := func(h http.HandlerFunc) http.HandlerFunc {
+		if !labOn {
+			return http.NotFound // 404, so the endpoint is not advertised
+		}
+		return h
+	}
+
 	mux := http.NewServeMux()
 	// backendFault is a fault primitive sitting between the gateway's
 	// defenses and the backend, switched off until an experiment turns
@@ -122,7 +136,7 @@ func main() {
 	// POST /scale?replicas=N — resize this process's sync worker pool
 	// (goroutines, not pods), with a blast-radius guard: never below
 	// 1, never above 32 on this box.
-	mux.HandleFunc("/scale", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/scale", labOnly(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -136,7 +150,7 @@ func main() {
 		metrics.SyncReplicas.Set(float64(n))
 		log.Printf("scale: replicas %d -> %d", prev, n)
 		writeJSON(w, http.StatusOK, map[string]any{"previous": prev, "replicas": n})
-	})
+	}))
 
 	// GET /query — MPP fan-out with fault primitives as query
 	// params: ?shards=8&keys=1000&straggler=2&straggler_ms=500&skew=0.9
@@ -188,7 +202,7 @@ func main() {
 	// served. Apply already returns its own restore function, so the
 	// experiment's Inject closure is the fault itself.
 	var experimentMu sync.Mutex
-	mux.HandleFunc("/experiments/pod-kill", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/experiments/pod-kill", labOnly(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -237,7 +251,7 @@ func main() {
 		syncPool.SetSize(original)
 		metrics.SyncReplicas.Set(float64(original))
 		writeJSON(w, http.StatusOK, v)
-	})
+	}))
 
 	// POST /experiments/backend-latency — the primitive-driven
 	// experiment. The fault is internal/fault's Latency primitive,
@@ -250,7 +264,7 @@ func main() {
 	// 100ms budget. The injected delay is larger than the budget, so
 	// the hypothesis should be violated while the fault is on and hold
 	// again once it is rolled back.
-	mux.HandleFunc("/experiments/backend-latency", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/experiments/backend-latency", labOnly(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -284,7 +298,7 @@ func main() {
 		}, 200*time.Millisecond)
 
 		writeJSON(w, http.StatusOK, v)
-	})
+	}))
 
 	log.Printf("flowgate listening on :%s (max_in_flight=%d, sync_replicas=%d)", port, cfg.Shedder.Capacity(), syncPool.Size())
 	log.Fatal(http.ListenAndServe(":"+port, mux))
