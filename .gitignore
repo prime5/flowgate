@@ -13,3 +13,8 @@ private/
 /flowgate
 /faultdemo
 /flowgate-mcp
+
+# Python bytecode and test caches from agent/
+__pycache__/
+*.py[cod]
+.pytest_cache/

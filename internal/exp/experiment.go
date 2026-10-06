@@ -42,12 +42,12 @@ type Experiment struct {
 
 // Verdict is the outcome of one experiment run.
 type Verdict struct {
-	Name        string
-	Held        bool // steady state held for the whole fault window
-	BaselineOK  bool // steady state held before injection
-	Recovered   bool // steady state returned within RecoveryTimeout of rollback
-	BlastRadius float64
-	Detail      string
+	Name        string  `json:"name"`
+	Held        bool    `json:"held"`        // steady state held for the whole fault window
+	BaselineOK  bool    `json:"baseline_ok"` // steady state held before injection
+	Recovered   bool    `json:"recovered"`   // steady state returned within RecoveryTimeout of rollback
+	BlastRadius float64 `json:"blast_radius"`
+	Detail      string  `json:"detail"`
 }
 
 // Run executes the experiment: verify the baseline, inject, sample
