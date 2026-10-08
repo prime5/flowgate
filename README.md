@@ -37,6 +37,16 @@ not just to pass a tutorial. In layman's terms: flowgate is a project I built an
 - `internal/metrics` — Prometheus text-exposition writer, no external
   dependency: `flowgate_requests_total{outcome=...}`, `flowgate_breaker_state`,
   `flowgate_in_flight_requests`.
+- `internal/telemetry` — OpenTelemetry tracing, opt-in. The middleware emits
+  one `flowgate.request` server span per request, parented to the caller's
+  W3C `traceparent` when present, with a child span per stage that ran
+  (`shed`, `ratelimit`, `breaker`, `backend`); a request rejected early has
+  fewer children, so the shape of a trace shows where it stopped. The trace
+  ID comes back in `X-Trace-Id`. With `OTEL_EXPORTER_OTLP_ENDPOINT` unset
+  nothing is exported. To view traces:
+  `docker compose -f deploy/tracing/docker-compose.yml up -d`, then
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./flowgate` and open
+  http://localhost:16686.
 - `internal/mcp` — Model Context Protocol server over JSON-RPC 2.0 on
   stdio, hand-rolled with no third-party dependencies, for the same
   reason `internal/metrics` hand-writes Prometheus exposition. Exposes

@@ -22,8 +22,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prime5/flowgate/internal/breaker"
@@ -35,10 +37,19 @@ import (
 	"github.com/prime5/flowgate/internal/pool"
 	"github.com/prime5/flowgate/internal/ratelimit"
 	"github.com/prime5/flowgate/internal/shedder"
+	"github.com/prime5/flowgate/internal/telemetry"
 )
 
 func main() {
 	port := envOr("PORT", "8080")
+
+	// Tracing is opt-in: with OTEL_EXPORTER_OTLP_ENDPOINT unset this only
+	// installs the trace-context propagator. It must run before
+	// ratelimit.Wrap below, which takes its tracer from the global provider.
+	shutdownTracing, err := telemetry.Setup(context.Background(), "flowgate")
+	if err != nil {
+		log.Fatalf("tracing setup: %v", err)
+	}
 
 	cfg := ratelimit.Config{
 		Limiter: limiter.NewRegistry(envFloat("RL_BURST", 20), envFloat("RL_RATE", 5)), // 20 burst, 5 req/s sustained per client
@@ -301,7 +312,24 @@ func main() {
 	}))
 
 	log.Printf("flowgate listening on :%s (max_in_flight=%d, sync_replicas=%d)", port, cfg.Shedder.Capacity(), syncPool.Size())
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	// Shut down on SIGINT/SIGTERM instead of dying inside ListenAndServe:
+	// the tracer batches spans in memory, and an abrupt exit would drop
+	// exactly the last requests before a stop, the ones you most want.
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-sigCtx.Done()
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(c)
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+	if err := shutdownTracing(context.Background()); err != nil {
+		log.Printf("tracing shutdown: %v", err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
