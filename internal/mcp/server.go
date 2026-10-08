@@ -7,6 +7,11 @@ import (
 	"io"
 	"log"
 	"sync"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ProtocolVersion is the MCP revision this server implements.
@@ -228,6 +233,11 @@ func (s *Server) toolList() []map[string]any {
 type callParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	Meta      struct {
+		// Traceparent is the W3C traceparent the caller sent in
+		// params._meta, or "" when the caller sent none.
+		Traceparent string `json:"traceparent"`
+	} `json:"_meta"`
 }
 
 func (s *Server) handleCall(ctx context.Context, req *request) *response {
@@ -245,6 +255,12 @@ func (s *Server) handleCall(ctx context.Context, req *request) *response {
 		return newError(req.ID, CodeMethodNotFound, "unknown tool: "+p.Name, nil)
 	}
 
+	// The handler runs under the tool span, so anything it starts
+	// with this ctx — including the experiment the tool launches —
+	// nests inside the caller's trace.
+	ctx, span := startToolSpan(ctx, p.Name, p.Meta.Traceparent)
+	defer span.End()
+
 	result, err := t.Handler(ctx, p.Arguments)
 	if err != nil {
 		// Execution errors come back as results with isError, so the
@@ -255,6 +271,27 @@ func (s *Server) handleCall(ctx context.Context, req *request) *response {
 		}, true))
 	}
 	return newResult(req.ID, toolResult(result, false))
+}
+
+// startToolSpan continues the trace the caller sent in params._meta.
+//
+// The Python agent generates one trace id per session and a fresh span
+// id per request, so a run_experiment and the get_verdict polls that
+// follow it land in a single trace. The span is a server span: the
+// caller's span id becomes its parent, and the returned ctx carries it
+// into the tool handler.
+//
+// A missing or malformed traceparent starts a new trace instead of an
+// error. Tracing is observability — it must never be the reason a tool
+// call fails.
+func startToolSpan(ctx context.Context, tool, traceparent string) (context.Context, trace.Span) {
+	if traceparent != "" {
+		ctx = otel.GetTextMapPropagator().Extract(
+			ctx, propagation.MapCarrier{"traceparent": traceparent})
+	}
+	return otel.Tracer("flowgate/mcp").Start(ctx, "mcp.tools/call",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("mcp.tool", tool)))
 }
 
 // toolResult builds the dual-form payload MCP expects: structured

@@ -33,12 +33,23 @@ stderr pipe buffer while nobody reads it will block forever.
 
 Messages are newline-delimited JSON: Go's ``json.Encoder`` terminates
 each value with a newline, and this client writes the same way.
+
+# Tracing
+
+Every request carries the client's trace context in ``params._meta``,
+the slot MCP reserves for request metadata. The trace id is fixed for
+the client's session — a ``run_experiment`` and its ``get_verdict``
+polls land in one trace — while the span id is fresh per request, so
+each call is its own span. The Go server continues the trace from
+there. Trace ids come from ``secrets``, and there are no third-party
+dependencies: this file stays stdlib-only.
 """
 
 from __future__ import annotations
 
 import json
 import queue
+import secrets
 import subprocess
 import threading
 import time
@@ -154,6 +165,12 @@ class MCPClient:
         self._pending: dict[int, dict[str, Any]] = {}
         self._stderr: deque[str] = deque(maxlen=stderr_lines)
         self._initialized = False
+
+        # One trace per session: every request this client sends joins
+        # it, each as its own span. Generated here rather than per call
+        # so a run_experiment and the polls that follow it are one
+        # trace on the server's side too.
+        self._trace_id = secrets.token_hex(16)
 
         try:
             self._proc = subprocess.Popen(
@@ -309,6 +326,7 @@ class MCPClient:
         self._next_id += 1
 
         message: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id, "method": method}
+        params = self._with_trace_meta(params)
         if params is not None:
             message["params"] = params
         self._write(message)
@@ -322,6 +340,27 @@ class MCPClient:
                 data=err.get("data"),
             )
         return reply.get("result", {}) or {}
+
+    def _with_trace_meta(self, params: Any) -> Any:
+        """Attach this session's trace context to an outgoing request.
+
+        The W3C traceparent goes in ``params._meta``. The span id is
+        fresh per request; the trace id is the session's. A
+        caller-supplied ``_meta`` is kept and only gains a traceparent,
+        and non-dict params are left alone — tracing is metadata, never
+        a reason to reshape the caller's payload.
+        """
+        traceparent = f"00-{self._trace_id}-{secrets.token_hex(8)}-01"
+        if params is None:
+            return {"_meta": {"traceparent": traceparent}}
+        if isinstance(params, dict):
+            out = dict(params)
+            meta = out.get("_meta")
+            merged = dict(meta) if isinstance(meta, dict) else {}
+            merged.setdefault("traceparent", traceparent)
+            out["_meta"] = merged
+            return out
+        return params
 
     def _notify(self, method: str, params: Any = None) -> None:
         """Send a message with no id. The server must not reply."""

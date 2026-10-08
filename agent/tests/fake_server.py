@@ -87,6 +87,15 @@ def main() -> None:
         req = json.loads(line)
         method, req_id = req.get("method"), req.get("id")
 
+        # Echo the caller's trace context to stderr so tests can assert
+        # on it without the protocol growing a test-only reply field.
+        params = req.get("params")
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        traceparent = meta.get("traceparent") if isinstance(meta, dict) else None
+        if traceparent:
+            print(f"fake: traceparent={traceparent}", file=sys.stderr)
+            sys.stderr.flush()
+
         if "hang" in modes:
             continue  # accept everything, answer nothing
 
