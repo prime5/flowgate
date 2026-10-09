@@ -124,8 +124,15 @@ def main():
         if sc3["status"] == "done":
             v = sc3["verdict"]
             print(f"\n  {BOLD}VERDICT{RESET}")
-            for k in ("Name", "BaselineOK", "Held", "Recovered", "BlastRadius", "Detail"):
-                print(f"    {k:<12} {v.get(k)}")
+            for label, key in [
+                ("Name", "name"),
+                ("BaselineOK", "baseline_ok"),
+                ("Held", "held"),
+                ("Recovered", "recovered"),
+                ("BlastRadius", "blast_radius"),
+                ("Detail", "detail"),
+            ]:
+                print(f"    {label:<12} {v.get(key)}")
             print(f"\n{DIM}    BaselineOK true  = the system was healthy before injection{RESET}")
             print(f"{DIM}    Held       false = the fault broke the hypothesis -- usually the point{RESET}")
             print(f"{DIM}    Recovered  true  = it came back after rollback; false is what should worry you{RESET}")

@@ -51,8 +51,20 @@ func main() {
 		log.Fatalf("tracing setup: %v", err)
 	}
 
+	var lim limiter.Limiter = limiter.NewRegistry(envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
+	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
+		rLim, err := limiter.NewRedisLimiter(redisAddr, envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
+		if err != nil {
+			log.Fatalf("redis limiter init: %v", err)
+		}
+		lim = rLim
+		log.Printf("using Redis-backed shared limiter at %s (burst=%.0f, rate=%.0f)", redisAddr, envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
+	} else {
+		log.Printf("using in-process memory limiter (burst=%.0f, rate=%.0f)", envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
+	}
+
 	cfg := ratelimit.Config{
-		Limiter: limiter.NewRegistry(envFloat("RL_BURST", 20), envFloat("RL_RATE", 5)), // 20 burst, 5 req/s sustained per client
+		Limiter: lim,
 		Breaker: breaker.New(envInt("BREAKER_THRESHOLD", 5), 10*time.Second),
 		Shedder: shedder.New(envInt("MAX_IN_FLIGHT", 50)),
 	}

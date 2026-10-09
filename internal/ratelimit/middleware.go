@@ -24,7 +24,7 @@ import (
 
 // Config bundles the three primitives the middleware coordinates.
 type Config struct {
-	Limiter *limiter.Registry
+	Limiter limiter.Limiter
 	Breaker *breaker.Breaker
 	Shedder *shedder.Shedder
 	// KeyFunc extracts the rate-limit key (e.g. client IP or API key)

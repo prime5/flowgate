@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// Limiter is the interface for rate limiting across keys.
+// Both in-process Registry and distributed RedisLimiter implement this.
+type Limiter interface {
+	Allow(key string) (bool, time.Duration)
+}
+
 // Bucket is a single token bucket: one client's rate-limit state.
 // Safe for concurrent use — Allow is guarded by a mutex.
 type Bucket struct {
