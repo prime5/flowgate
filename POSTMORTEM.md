@@ -82,7 +82,7 @@ caught without running a real load test against the real deployment.
 
 - **Rate limiter**: 0% effective in this deployment topology (see root cause).
 
-## Remediation (not yet applied)
+## Remediation (applied)
 
 - Derive the client key from the `Fly-Client-IP` header (set by Fly.io's proxy
   to the real client IP) when present, falling back to `RemoteAddr` for local,
@@ -92,7 +92,36 @@ caught without running a real load test against the real deployment.
 
 ## Follow-up
 
-- [ ] Fix `KeyFunc` to use `Fly-Client-IP` with a `RemoteAddr` fallback.
-- [ ] Re-run `loadtest.js` against the fixed deployment and record results here.
-- [ ] Add a unit test asserting the middleware's default key function prefers
-      a forwarded-client-IP header when present.
+- [x] Fix `KeyFunc` to use `Fly-Client-IP` with a `RemoteAddr` fallback. The
+      header is trusted only when `TRUST_FLY_CLIENT_IP=1`, which `fly.toml`
+      sets; elsewhere a client-supplied value is ignored.
+- [x] Add a unit test asserting the middleware's key function behaves as above,
+      including that a rotating header cannot evade the limit when untrusted.
+- [x] Verify on the deployed service (below).
+- [ ] Re-run the full `loadtest.js` ramp against the fixed deployment and
+      record the numbers here. Not done: the check below is a 100-request
+      burst, not the 150 s ramp.
+
+## Live verification (2026-10-09)
+
+Burst of 100 concurrent requests to `/work` on the fixed deployment, from one
+laptop (one client IP):
+
+```
+seq 100 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
+  https://flowgate-pramathesh.fly.dev/work | sort | uniq -c
+```
+
+| Run | 200 | 429 |
+| --- | --- | --- |
+| First | 20 | 80 |
+| Second | 21 | 79 |
+
+That is the configured burst of 20 (plus one token refilled during the run),
+then refusals. Immediately after the second run, while the laptop was being
+refused, a request from a phone on a cellular network returned 200. So
+different clients get separate buckets; before the fix the whole deployment
+shared one.
+
+What this does not show: behaviour at sustained high load, or the shared
+(Redis) limiter across replicas on Fly.

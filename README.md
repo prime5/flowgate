@@ -220,9 +220,13 @@ with a distinct `Fly-Client-IP` per virtual user.
 REDIS_ADDR= docker compose -f deploy/shared-limiter/docker-compose.yml up --build
 # After: one bucket in Redis, shared by all three
 docker compose -f deploy/shared-limiter/docker-compose.yml up --build
-# Then, for each:
-k6 run -e BASE_URL=http://localhost:8000 loadtest.js
+# Then, for each, send one client key as fast as possible and count admissions:
+python3 scripts/limiter-compare.py
 ```
+
+The script reports admitted requests against the most a single bucket could
+admit in the same time (burst plus refill). A ratio near 1 means one shared
+bucket; near 3 with three replicas means each replica kept its own.
 
 | Run | Per-client limit | Admitted per client | Result |
 | --- | --- | --- | --- |
