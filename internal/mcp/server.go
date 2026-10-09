@@ -273,6 +273,27 @@ func (s *Server) handleCall(ctx context.Context, req *request) *response {
 	return newResult(req.ID, toolResult(result, false))
 }
 
+// Call executes a registered tool by name with arguments.
+// It returns the tool result (or error payload), a boolean indicating if it
+// was an execution refusal/failure (isError: true), and any protocol error.
+func (s *Server) Call(ctx context.Context, name string, args json.RawMessage) (any, bool, error) {
+	s.mu.RLock()
+	t, ok := s.tools[name]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false, errors.New("unknown tool: " + name)
+	}
+
+	ctx, span := startToolSpan(ctx, name, "")
+	defer span.End()
+
+	result, err := t.Handler(ctx, args)
+	if err != nil {
+		return map[string]any{"error": err.Error()}, true, nil
+	}
+	return result, false, nil
+}
+
 // startToolSpan continues the trace the caller sent in params._meta.
 //
 // The Python agent generates one trace id per session and a fresh span
