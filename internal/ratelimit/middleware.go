@@ -30,17 +30,32 @@ type Config struct {
 	// KeyFunc extracts the rate-limit key (e.g. client IP or API key)
 	// from a request. Defaults to r.RemoteAddr if nil.
 	KeyFunc func(*http.Request) string
+	// TrustFlyClientIP makes the default key function key on the
+	// Fly-Client-IP header. Set it ONLY when every request reaches
+	// flowgate through a proxy that overwrites that header (Fly's
+	// edge, or the nginx in deploy/shared-limiter). Reachable
+	// directly, the header is attacker-controlled and rotating it
+	// would give every request a fresh bucket. Off by default, so an
+	// unconfigured deployment keys on the socket peer address and
+	// cannot be bypassed this way. Ignored when KeyFunc is set.
+	TrustFlyClientIP bool
 }
 
-func defaultKeyFunc(r *http.Request) string {
-	if ip := r.Header.Get("Fly-Client-IP"); ip != "" {
-		return ip
+// keyFuncFor returns the default per-client key function. With
+// trustFlyHeader false the key is the connection's peer address only.
+func keyFuncFor(trustFlyHeader bool) func(*http.Request) string {
+	return func(r *http.Request) string {
+		if trustFlyHeader {
+			if ip := r.Header.Get("Fly-Client-IP"); ip != "" {
+				return ip
+			}
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			return r.RemoteAddr
+		}
+		return host
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // Wrap returns next wrapped with load shedding, per-key rate limiting
@@ -59,7 +74,7 @@ func defaultKeyFunc(r *http.Request) string {
 func Wrap(cfg Config, next http.Handler) http.Handler {
 	keyFunc := cfg.KeyFunc
 	if keyFunc == nil {
-		keyFunc = defaultKeyFunc
+		keyFunc = keyFuncFor(cfg.TrustFlyClientIP)
 	}
 	tracer := otel.GetTracerProvider().Tracer("github.com/prime5/flowgate/internal/ratelimit")
 

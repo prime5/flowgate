@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// defaultKeyFunc is the only place in the gateway where one client is
+// keyFuncFor is the only place in the gateway where one client is
 // distinguished from another. Everything the per-client rate limit
 // claims rests on it, so it gets tested directly rather than only
 // through the middleware.
-func TestDefaultKeyFunc(t *testing.T) {
+func TestKeyFuncFor_Trusted(t *testing.T) {
 	tests := []struct {
 		name       string
 		remoteAddr string
@@ -78,29 +78,48 @@ func TestDefaultKeyFunc(t *testing.T) {
 				req.Header.Set("Fly-Client-IP", tt.flyHeader)
 			}
 
-			if got := defaultKeyFunc(req); got != tt.want {
-				t.Fatalf("defaultKeyFunc() = %q, want %q", got, tt.want)
+			if got := keyFuncFor(true)(req); got != tt.want {
+				t.Fatalf("keyFuncFor(true) = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestDefaultKeyFunc_TrustsFlyHeaderUnconditionally pins down a
-// property worth being deliberate about: the header is trusted with no
-// check that the request actually came through Fly's proxy. Behind the
-// proxy that's correct, because Fly overwrites Fly-Client-IP on every
-// inbound request. Reachable directly, it means a caller can rotate the
-// header and get a fresh bucket per request.
-//
-// This test asserts the current behaviour so a future change to it is a
-// deliberate one, not a surprise.
-func TestDefaultKeyFunc_TrustsFlyHeaderUnconditionally(t *testing.T) {
+// With the header untrusted (the default) it must be ignored entirely:
+// the key is the socket peer, whatever the header says.
+func TestKeyFuncFor_UntrustedIgnoresFlyHeader(t *testing.T) {
 	req := httptest.NewRequest("GET", "/work", nil)
 	req.RemoteAddr = "1.2.3.4:5678"
-	req.Header.Set("Fly-Client-IP", "not-an-ip-at-all")
+	req.Header.Set("Fly-Client-IP", "203.0.113.7")
 
-	if got := defaultKeyFunc(req); got != "not-an-ip-at-all" {
-		t.Fatalf("defaultKeyFunc() = %q, want the header value verbatim", got)
+	if got := keyFuncFor(false)(req); got != "1.2.3.4" {
+		t.Fatalf("keyFuncFor(false) = %q, want the peer address 1.2.3.4", got)
+	}
+}
+
+// Regression for the bypass: when flowgate is reachable directly, a
+// caller that rotates Fly-Client-IP must still hit ONE bucket (its own
+// address) unless the operator opted in to trusting the header.
+func TestMiddleware_RotatingFlyHeaderDoesNotEvadeLimitWhenUntrusted(t *testing.T) {
+	cfg := newTestConfig(1, 1, 10, 3) // burst 1; TrustFlyClientIP left false
+	h := Wrap(cfg, http.HandlerFunc(okHandler))
+
+	do := func(spoofed string) int {
+		req := httptest.NewRequest("GET", "/work", nil)
+		req.RemoteAddr = "198.51.100.9:40000"
+		req.Header.Set("Fly-Client-IP", spoofed)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := do("10.0.0.1"); code != http.StatusOK {
+		t.Fatalf("first request: got %d, want 200", code)
+	}
+	for _, ip := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4"} {
+		if code := do(ip); code != http.StatusTooManyRequests {
+			t.Fatalf("request with rotated header %s: got %d, want 429 (header must be ignored when untrusted)", ip, code)
+		}
 	}
 }
 
@@ -134,6 +153,7 @@ func TestMiddleware_SeparateBucketsPerRemoteAddr(t *testing.T) {
 
 func TestMiddleware_SeparateBucketsPerFlyClientIP(t *testing.T) {
 	cfg := newTestConfig(1, 1, 10, 3)
+	cfg.TrustFlyClientIP = true // production path: behind Fly's proxy
 	h := Wrap(cfg, http.HandlerFunc(okHandler))
 
 	// Every request arrives from the same proxy address; only the

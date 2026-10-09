@@ -47,6 +47,36 @@ not just to pass a tutorial. In layman's terms: flowgate is a project I built an
   `docker compose -f deploy/tracing/docker-compose.yml up -d`, then
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./flowgate` and open
   http://localhost:16686.
+- `internal/limiter` — per-key token bucket. The default is in-process, so N
+  replicas behind a load balancer enforce N separate limits. With
+  `REDIS_ADDR` set, the bucket lives in Redis instead: a small hand-rolled
+  RESP client runs one Lua script that refills and takes a token atomically,
+  using Redis `TIME` so replicas with skewed clocks agree. If Redis is
+  unreachable the limiter **fails open** (the gateway keeps serving, the
+  limit is not enforced); every such request is counted in
+  `flowgate_limiter_fail_open_total` and logged at most once per 10s. See
+  DECISIONS.md for why. The Lua script is exercised against a real Redis in
+  `redis_integration_test.go`, which runs only when `REDIS_ADDR` is set:
+  `docker run --rm -p 6379:6379 redis:7-alpine` then
+  `REDIS_ADDR=localhost:6379 go test ./internal/limiter -race -v`.
+- Per-client keys: by default the key is the connection's peer address.
+  `TRUST_FLY_CLIENT_IP=1` makes it the `Fly-Client-IP` header instead; set it
+  only where every request comes through a proxy that sets that header
+  (`fly.toml` does; the compose lab does, with k6 supplying the header).
+  Left on where clients connect directly, a caller could rotate the header to
+  get a fresh bucket per request.
+- `internal/runner` — a channel-agnostic message envelope and a multi-turn
+  runner that executes MCP tool calls and keeps per-conversation state
+  (in-memory store; e.g. `get_verdict` with no `experiment_id` uses the
+  experiment the conversation last started). It is a tool-calling loop
+  only, not a dialog engine: no language understanding, no intent
+  detection. Turns on one conversation are serialised by a per-conversation
+  lock, history is capped (`DefaultMaxHistory`, 200 envelopes), and
+  different conversations run in parallel.
+- Trace propagation through MCP: a client puts a W3C `traceparent` in the
+  tool call's `params._meta`; the server extracts it and parents its tool
+  span to the caller's trace, so the server-side spans carry the trace ID the
+  agent started with.
 - `internal/mcp` — Model Context Protocol server over JSON-RPC 2.0 on
   stdio, hand-rolled with no third-party dependencies, for the same
   reason `internal/metrics` hand-writes Prometheus exposition. Exposes
@@ -171,3 +201,22 @@ state, one fault, a blast radius, and a rollback — see
 - `/metrics` has no external dependency on purpose — the Prometheus text
   format is simple enough to hand-write, and doing so means every line on
   that endpoint is something this project actually implements.
+
+## Shared limiter: before and after
+
+Three replicas behind nginx (`deploy/shared-limiter`), hit by `loadtest.js`
+with a distinct `Fly-Client-IP` per virtual user.
+
+```
+# Before: each replica has its own bucket, so the effective limit is ~3x
+REDIS_ADDR= docker compose -f deploy/shared-limiter/docker-compose.yml up --build
+# After: one bucket in Redis, shared by all three
+docker compose -f deploy/shared-limiter/docker-compose.yml up --build
+# Then, for each:
+k6 run -e BASE_URL=http://localhost:8000 loadtest.js
+```
+
+| Run | Per-client limit | Admitted per client | Result |
+| --- | --- | --- | --- |
+| In-process (`REDIS_ADDR=`) | burst 20, 5/s | _TODO: record from k6_ | |
+| Redis-backed | burst 20, 5/s | _TODO: record from k6_ | |

@@ -15,6 +15,11 @@ services:
       - RL_BURST=${RL_BURST:-20}
       - RL_RATE=${RL_RATE:-5}
       - FLOWGATE_LAB=1
+      # Lab only: nginx forwards the client-supplied Fly-Client-IP and the
+      # k6 load test sets a distinct one per virtual user, so per-client
+      # keys need this on. Never enable it where clients reach flowgate
+      # directly: they could rotate the header to evade the limit.
+      - TRUST_FLY_CLIENT_IP=1
     depends_on:
       - redis
 
@@ -28,6 +33,11 @@ services:
       - RL_BURST=${RL_BURST:-20}
       - RL_RATE=${RL_RATE:-5}
       - FLOWGATE_LAB=1
+      # Lab only: nginx forwards the client-supplied Fly-Client-IP and the
+      # k6 load test sets a distinct one per virtual user, so per-client
+      # keys need this on. Never enable it where clients reach flowgate
+      # directly: they could rotate the header to evade the limit.
+      - TRUST_FLY_CLIENT_IP=1
     depends_on:
       - redis
 
@@ -41,6 +51,11 @@ services:
       - RL_BURST=${RL_BURST:-20}
       - RL_RATE=${RL_RATE:-5}
       - FLOWGATE_LAB=1
+      # Lab only: nginx forwards the client-supplied Fly-Client-IP and the
+      # k6 load test sets a distinct one per virtual user, so per-client
+      # keys need this on. Never enable it where clients reach flowgate
+      # directly: they could rotate the header to evade the limit.
+      - TRUST_FLY_CLIENT_IP=1
     depends_on:
       - redis
 

@@ -7,6 +7,12 @@ app = 'flowgate-pramathesh'
 primary_region = 'sjc'
 
 [build]
+
+[env]
+  # Fly's edge overwrites Fly-Client-IP on every request, so it is safe
+  # to key per-client limits on it here and nowhere else.
+  TRUST_FLY_CLIENT_IP = '1'
+
 [http_service]
   internal_port = 8080
   force_https = true

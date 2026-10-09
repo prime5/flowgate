@@ -88,6 +88,13 @@ var (
 	// cpuburn | blackhole. A call a primitive sampled out is not an
 	// injected fault and is not counted here.
 	FaultInjectedTotal = newCounterVec()
+
+	// LimiterFailOpenTotal counts requests the shared (Redis) limiter
+	// admitted only because it could not reach Redis. Failing open is a
+	// deliberate availability choice (see DECISIONS.md), so its cost has
+	// to be visible: a non-zero rate means the per-client limit is NOT
+	// being enforced. Labeled by backend; only "redis" is used today.
+	LimiterFailOpenTotal = newCounterVec()
 )
 
 // Register exists to keep call sites symmetric with libraries that
@@ -140,6 +147,15 @@ func WriteTo(w io.Writer) error {
 	var err error
 	for _, n := range names {
 		_, err = fmt.Fprintf(w, "flowgate_fault_injected_total{primitive=%q} %d\n", n, faults[n])
+	}
+
+	fmt.Fprintf(w, "# HELP flowgate_limiter_fail_open_total Requests admitted because the shared limiter could not reach Redis (limit not enforced).\n")
+	fmt.Fprintf(w, "# TYPE flowgate_limiter_fail_open_total counter\n")
+	// Always emit the redis series, including at 0, so an alert on
+	// rate(...) > 0 has a series to evaluate from the first scrape.
+	_, err2 := fmt.Fprintf(w, "flowgate_limiter_fail_open_total{backend=\"redis\"} %d\n", LimiterFailOpenTotal.snapshot()["redis"])
+	if err == nil {
+		err = err2
 	}
 	return err
 }

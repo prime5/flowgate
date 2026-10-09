@@ -5,8 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
+
+// DefaultMaxHistory bounds how many envelopes a session keeps. Without a
+// cap a long-lived conversation grows without limit, and every Get/Save
+// copies the whole history.
+const DefaultMaxHistory = 200
 
 // ToolDispatcher defines the contract for dispatching tool calls to the underlying MCP server.
 type ToolDispatcher interface {
@@ -19,8 +25,57 @@ type ToolDispatcher interface {
 // As per repository design rules: this is an explicit, multi-turn tool-calling
 // interface ONLY, NOT a dialog engine; it makes NO Natural Language Understanding claims.
 type Runner struct {
+	// MaxHistory caps the envelopes kept per session (oldest dropped
+	// first). Zero means DefaultMaxHistory.
+	MaxHistory int
+
 	store      SessionStore
 	dispatcher ToolDispatcher
+
+	// Handle is a read-modify-write on the session (Get, run tools, Save).
+	// Two concurrent turns on the SAME conversation would otherwise each
+	// start from the same snapshot and the later Save would silently drop
+	// the earlier turn's history and ActiveExperimentID. A per-conversation
+	// lock serialises turns on one conversation while leaving different
+	// conversations fully parallel. Entries are refcounted and removed when
+	// idle so the map does not grow with every conversation ever seen.
+	lockMu sync.Mutex
+	locks  map[string]*convLock
+}
+
+type convLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lock acquires the conversation's mutex and returns the release func.
+func (r *Runner) lock(id string) func() {
+	r.lockMu.Lock()
+	l, ok := r.locks[id]
+	if !ok {
+		l = &convLock{}
+		r.locks[id] = l
+	}
+	l.refs++
+	r.lockMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		r.lockMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(r.locks, id)
+		}
+		r.lockMu.Unlock()
+	}
+}
+
+func (r *Runner) maxHistory() int {
+	if r.MaxHistory > 0 {
+		return r.MaxHistory
+	}
+	return DefaultMaxHistory
 }
 
 // New creates a new orchestration Runner.
@@ -31,6 +86,7 @@ func New(store SessionStore, dispatcher ToolDispatcher) *Runner {
 	return &Runner{
 		store:      store,
 		dispatcher: dispatcher,
+		locks:      make(map[string]*convLock),
 	}
 }
 
@@ -40,6 +96,8 @@ func (r *Runner) Handle(ctx context.Context, req Envelope) (Envelope, error) {
 	if req.ConversationID == "" {
 		return Envelope{}, errors.New("runner: conversation_id is required")
 	}
+
+	defer r.lock(req.ConversationID)()
 
 	session, err := r.store.Get(ctx, req.ConversationID)
 	if err != nil {
@@ -115,6 +173,10 @@ func (r *Runner) Handle(ctx context.Context, req Envelope) (Envelope, error) {
 	}
 
 	session.History = append(session.History, req, resp)
+	if max := r.maxHistory(); len(session.History) > max {
+		// Copy rather than reslice so the dropped prefix can be collected.
+		session.History = append([]Envelope(nil), session.History[len(session.History)-max:]...)
+	}
 	session.UpdatedAt = time.Now().UTC()
 
 	if err := r.store.Save(ctx, session); err != nil {

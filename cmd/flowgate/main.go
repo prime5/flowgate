@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -57,14 +58,34 @@ func main() {
 		if err != nil {
 			log.Fatalf("redis limiter init: %v", err)
 		}
+		// Fail-open keeps the gateway serving when Redis is down, but it
+		// silently turns the limit off. Count every occurrence in
+		// /metrics and log at most once per 10s so an outage is loud
+		// without flooding the log at request rate.
+		var lastLogged atomic.Int64
+		rLim.OnFailOpen = func(err error) {
+			metrics.LimiterFailOpenTotal.Inc("redis")
+			now := time.Now().UnixNano()
+			prev := lastLogged.Load()
+			if now-prev > int64(10*time.Second) && lastLogged.CompareAndSwap(prev, now) {
+				log.Printf("WARN shared limiter failing open (rate limit NOT enforced): %v", err)
+			}
+		}
 		lim = rLim
 		log.Printf("using Redis-backed shared limiter at %s (burst=%.0f, rate=%.0f)", redisAddr, envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
 	} else {
 		log.Printf("using in-process memory limiter (burst=%.0f, rate=%.0f)", envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
 	}
 
+	if os.Getenv("TRUST_FLY_CLIENT_IP") == "1" {
+		log.Printf("trusting Fly-Client-IP for per-client keys (only safe behind a proxy that sets it)")
+	}
+
 	cfg := ratelimit.Config{
 		Limiter: lim,
+		// Only trust Fly-Client-IP when told every request arrives via a
+		// proxy that overwrites it (Fly's edge, or the compose nginx).
+		TrustFlyClientIP: os.Getenv("TRUST_FLY_CLIENT_IP") == "1",
 		Breaker: breaker.New(envInt("BREAKER_THRESHOLD", 5), 10*time.Second),
 		Shedder: shedder.New(envInt("MAX_IN_FLIGHT", 50)),
 	}

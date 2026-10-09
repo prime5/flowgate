@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -69,6 +70,15 @@ type RedisLimiter struct {
 	keyPrefix string
 	dial      func() (net.Conn, error)
 
+	// OnFailOpen, when set, is called each time a request is admitted
+	// only because Redis could not be reached or answered. Without it a
+	// Redis outage removes all rate limiting with no sign of it:
+	// callers wire this to a metric and a log line. It runs on the
+	// request path, so it must be cheap and must not block.
+	OnFailOpen func(err error)
+
+	failOpenCount atomic.Uint64
+
 	mu     sync.Mutex
 	closed bool
 	pool   chan net.Conn
@@ -94,13 +104,16 @@ func NewRedisLimiter(addr string, capacity, ratePerSec float64) (*RedisLimiter, 
 }
 
 // Allow reports whether a request for key is allowed right now.
-// If Redis is unavailable or times out, it fails open (returns true, 0)
-// to ensure gateway availability under cache/network degradation.
+//
+// If Redis is unavailable, times out or answers with something
+// unexpected, it fails open (returns true, 0) so a limiter outage does
+// not become a gateway outage. The tradeoff is that the limit simply
+// disappears while Redis is down. Every fail-open is counted
+// (FailOpenCount) and reported through OnFailOpen so that is visible.
 func (r *RedisLimiter) Allow(key string) (bool, time.Duration) {
 	conn, err := r.getConn()
 	if err != nil {
-		// Fail open on Redis connection failure
-		return true, 0
+		return r.failOpen(err)
 	}
 
 	_ = conn.SetDeadline(time.Now().Add(r.timeout))
@@ -117,21 +130,21 @@ func (r *RedisLimiter) Allow(key string) (bool, time.Duration) {
 
 	if _, err := conn.Write(cmd); err != nil {
 		_ = conn.Close()
-		return true, 0
+		return r.failOpen(err)
 	}
 
 	reader := bufio.NewReader(conn)
 	resp, err := readRESP(reader)
 	if err != nil {
 		_ = conn.Close()
-		return true, 0
+		return r.failOpen(err)
 	}
 
 	r.putConn(conn)
 
 	arr, ok := resp.([]any)
 	if !ok || len(arr) < 2 {
-		return true, 0
+		return r.failOpen(errors.New("limiter: unexpected redis reply shape"))
 	}
 
 	allowedInt, _ := toInt(arr[0])
@@ -141,6 +154,21 @@ func (r *RedisLimiter) Allow(key string) (bool, time.Duration) {
 		return true, 0
 	}
 	return false, time.Duration(waitMS) * time.Millisecond
+}
+
+// failOpen records one fail-open decision and admits the request.
+func (r *RedisLimiter) failOpen(err error) (bool, time.Duration) {
+	r.failOpenCount.Add(1)
+	if r.OnFailOpen != nil {
+		r.OnFailOpen(err)
+	}
+	return true, 0
+}
+
+// FailOpenCount returns how many requests were admitted because Redis
+// could not be used.
+func (r *RedisLimiter) FailOpenCount() uint64 {
+	return r.failOpenCount.Load()
 }
 
 // Close closes all pooled connections.

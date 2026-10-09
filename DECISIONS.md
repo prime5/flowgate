@@ -201,3 +201,36 @@ So the verdict is evidence, not anecdote. "Latency broke the hypothesis at 40%
 blast radius, and the system recovered" is a claim someone else can reproduce and
 a reviewer can trust. Without the recorded radius, you don't know what was
 actually tested.
+
+## Shared limiter, trust and concurrency
+
+### The shared limiter fails open. Why?
+
+When Redis is unreachable the limiter admits the request. The alternative,
+failing closed, turns a Redis outage into a total gateway outage, and the
+limiter exists to protect the backend, not to be a dependency of it. The cost
+is real: during an outage the per-client limit is not enforced, so a
+misbehaving client is not slowed down. Two things keep that cost honest.
+Every fail-open is counted in `flowgate_limiter_fail_open_total` (alert on
+`rate(...) > 0`), and it is logged at most once per 10s. The load shedder and
+circuit breaker still run, so the gateway itself is still protected; only
+fairness between clients is lost. A deployment that cares more about strict
+limits than availability would flip this to fail closed.
+
+### Why is `Fly-Client-IP` opt-in?
+
+The header is only trustworthy when a proxy overwrites it. Trusted
+unconditionally, a client that reaches the gateway directly can send a new
+value on every request and never hit its own limit. So the default keys on the
+connection's peer address, and `TRUST_FLY_CLIENT_IP=1` turns the header on
+where the deployment guarantees the proxy.
+
+### Why a lock per conversation in the runner?
+
+`Handle` loads a session, runs tool calls, appends to history, saves. Two turns
+on one conversation that overlap each start from the same snapshot, and the
+later save silently drops the earlier turn. A mutex per conversation ID
+serialises exactly those turns and leaves different conversations parallel.
+This protects a single process; the store is in-memory, so a second replica
+would not share it. Sharing sessions across replicas would need a shared store
+and a distributed lock, which this does not attempt.
