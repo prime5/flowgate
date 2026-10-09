@@ -234,3 +234,47 @@ serialises exactly those turns and leaves different conversations parallel.
 This protects a single process; the store is in-memory, so a second replica
 would not share it. Sharing sessions across replicas would need a shared store
 and a distributed lock, which this does not attempt.
+
+## Slack
+
+### Why a public tunnel instead of Socket Mode?
+
+Socket Mode is simpler (an outbound websocket, no public URL) but Slack signs
+nothing on it, so there is no request authentication to build or to get wrong.
+The tunnel path makes the receiver do what a production Slack integration does:
+verify an HMAC over the raw body, reject stale timestamps, refuse anything
+unsigned. That verification is the part worth having, and it is covered by
+tests against Slack's published example and an independent Python computation.
+
+### Why does a failed signature return a bare 401?
+
+The response says nothing about why (bad signature, stale, missing header).
+The reason goes to the log. An attacker probing the URL learns nothing about
+which check they tripped.
+
+### Who may run an experiment, and why is that separate from the signature?
+
+A valid signature proves the request came from Slack, not that the person
+should be injecting faults. `run` needs the operator to opt in twice:
+`FLOWGATE_LAB=1` (the existing switch for fault endpoints) and a non-empty
+`SLACK_ALLOWED_USER_IDS`. An empty list allows nobody; it is not "allow all".
+`status` and `verdict` are read-only and open to anyone in the workspace.
+
+### Why does `run` answer immediately and post the verdict later?
+
+Slack requires a reply within three seconds and an experiment takes longer. The
+handler starts it, replies in the channel (so the team can see who started what),
+and a background poll posts the verdict to the command's `response_url`. That
+URL arrives in the request body, so it is only posted to if it is https on
+slack.com. A run that never finishes within the wait posts a "check later"
+message instead of polling forever.
+
+### Why poll for alerts instead of hooking the request path?
+
+A one-second poll of the breaker state and the limiter's fail-open counter
+cannot slow or break a request, and needs no change to the middleware. The
+cost: a state that flips and flips back inside one second is missed. The
+breaker holds open for ten seconds, so it is not. Alerts are throttled per
+kind (five minutes) so a flapping breaker is one message, not a stream; the
+recovery message is not throttled, so an alert is never left without its
+follow-up.

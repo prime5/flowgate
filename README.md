@@ -77,6 +77,14 @@ not just to pass a tutorial. In layman's terms: flowgate is a project I built an
   tool call's `params._meta`; the server extracts it and parents its tool
   span to the caller's trace, so the server-side spans carry the trace ID the
   agent started with.
+- `internal/slack` — Slack front end, standard library only. `POST /slack/command`
+  verifies Slack's request signature (HMAC-SHA256 over `v0:timestamp:body`,
+  5-minute replay window, constant-time compare) before reading anything,
+  then serves `/flowgate status`, `/flowgate verdict [id]` and
+  `/flowgate run <fault> <blast_radius> <duration_s>` through the same
+  `internal/runner` the CLI uses, with one conversation per user per channel.
+  A throttled webhook alerter posts when the circuit breaker opens or the
+  shared limiter starts failing open. See "Slack" below.
 - `internal/mcp` — Model Context Protocol server over JSON-RPC 2.0 on
   stdio, hand-rolled with no third-party dependencies, for the same
   reason `internal/metrics` hand-writes Prometheus exposition. Exposes
@@ -220,3 +228,53 @@ k6 run -e BASE_URL=http://localhost:8000 loadtest.js
 | --- | --- | --- | --- |
 | In-process (`REDIS_ADDR=`) | burst 20, 5/s | _TODO: record from k6_ | |
 | Redis-backed | burst 20, 5/s | _TODO: record from k6_ | |
+
+## Slack
+
+Off unless configured. All three variables are independent.
+
+| Variable | Effect |
+| --- | --- |
+| `SLACK_SIGNING_SECRET` | Mounts `POST /slack/command` (`status`, `verdict`). |
+| `SLACK_ALLOWED_USER_IDS` | Comma-separated Slack member IDs allowed to `run`. |
+| `SLACK_WEBHOOK_URL` | Posts alerts: breaker open / recovered, limiter failing open. |
+
+`run` starts fault injection, so it follows the same rule as `/scale` and
+`/experiments/*`: it also needs `FLOWGATE_LAB=1`. Without that, or with an
+empty allowlist, it answers "disabled". The experiments run in an MCP lab
+inside the process that injects faults into itself, not into the live `/work`
+path, and the server's blast-radius and duration caps still apply and are
+relayed, not bypassed.
+
+Try it without Slack (signs a request the same way Slack does):
+
+```
+SLACK_SIGNING_SECRET=local-secret FLOWGATE_LAB=1 SLACK_ALLOWED_USER_IDS=UTEST PORT=8080 ./flowgate
+```
+```
+SLACK_SIGNING_SECRET=local-secret python3 scripts/slack-curl.py status
+SLACK_SIGNING_SECRET=local-secret python3 scripts/slack-curl.py "run latency 0.2 5"
+SLACK_SIGNING_SECRET=local-secret python3 scripts/slack-curl.py --bad-signature status   # 401
+```
+
+Wire up a real workspace (menu names may differ slightly):
+
+1. https://api.slack.com/apps, Create New App, From scratch.
+2. Basic Information, App Credentials: copy the Signing Secret.
+3. Slash Commands, Create New Command: `/flowgate`, Request URL
+   `https://<your-tunnel>/slack/command`. Expose localhost with
+   `cloudflared tunnel --url http://localhost:8080` or `ngrok http 8080`.
+4. Incoming Webhooks, activate, Add New Webhook to Workspace, pick a channel,
+   copy the URL (must be `https://hooks.slack.com/...`).
+5. Install the app to the workspace. Your member ID is in your Slack profile,
+   under the three-dot menu, Copy member ID.
+6. Start flowgate with the three variables set (plus `FLOWGATE_LAB=1` to allow
+   `run`).
+
+The endpoint is not behind the per-client rate limiter; it is protected by the
+signature check and a 64 KB body cap.
+
+Verified against a real workspace through a Cloudflare quick tunnel:
+`/flowgate status`, and `/flowgate run latency 0.2 5` (acknowledged in the
+channel, verdict delivered afterwards through Slack's `response_url`). Socket
+Mode must be off in the app settings, otherwise Slack never calls the Request URL.

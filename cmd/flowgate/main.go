@@ -52,6 +52,8 @@ func main() {
 		log.Fatalf("tracing setup: %v", err)
 	}
 
+	limiterMode := "memory"
+	var failOpenCount func() uint64 // set only when the limiter is Redis-backed
 	var lim limiter.Limiter = limiter.NewRegistry(envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
 	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
 		rLim, err := limiter.NewRedisLimiter(redisAddr, envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
@@ -72,6 +74,8 @@ func main() {
 			}
 		}
 		lim = rLim
+		limiterMode = "redis"
+		failOpenCount = rLim.FailOpenCount
 		log.Printf("using Redis-backed shared limiter at %s (burst=%.0f, rate=%.0f)", redisAddr, envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
 	} else {
 		log.Printf("using in-process memory limiter (burst=%.0f, rate=%.0f)", envFloat("RL_BURST", 20), envFloat("RL_RATE", 5))
@@ -86,8 +90,8 @@ func main() {
 		// Only trust Fly-Client-IP when told every request arrives via a
 		// proxy that overwrites it (Fly's edge, or the compose nginx).
 		TrustFlyClientIP: os.Getenv("TRUST_FLY_CLIENT_IP") == "1",
-		Breaker: breaker.New(envInt("BREAKER_THRESHOLD", 5), 10*time.Second),
-		Shedder: shedder.New(envInt("MAX_IN_FLIGHT", 50)),
+		Breaker:          breaker.New(envInt("BREAKER_THRESHOLD", 5), 10*time.Second),
+		Shedder:          shedder.New(envInt("MAX_IN_FLIGHT", 50)),
 	}
 
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +355,18 @@ func main() {
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Slack is optional and inert unless SLACK_SIGNING_SECRET or
+	// SLACK_WEBHOOK_URL is set. See cmd/flowgate/slack.go.
+	setupSlack(sigCtx, mux, slackDeps{
+		Breaker:       cfg.Breaker,
+		Shedder:       cfg.Shedder,
+		LimiterMode:   limiterMode,
+		FailOpenCount: failOpenCount,
+		LabOn:         labOn,
+		TracingOn:     os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "",
+	})
+
 	go func() {
 		<-sigCtx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
