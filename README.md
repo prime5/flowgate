@@ -230,8 +230,14 @@ bucket; near 3 with three replicas means each replica kept its own.
 
 | Run | Per-client limit | Admitted per client | Result |
 | --- | --- | --- | --- |
-| In-process (`REDIS_ADDR=`) | burst 20, 5/s | _TODO: record from k6_ | |
-| Redis-backed | burst 20, 5/s | _TODO: record from k6_ | |
+| In-process (`REDIS_ADDR=`) | burst 20, 5/s | 60 of 300 (59 x 200, 1 x 500) | 3 x the limit: each replica kept its own bucket |
+| Redis-backed | burst 20, 5/s | 20 of 300 | One bucket: exactly the burst |
+
+Measured 2026-10-10 with `scripts/limiter-compare.py` on a laptop: one client
+key, 300 requests in about 0.1 s, one run each, so refill adds under one
+token. The single 500 is the demo backend's deliberate 2% failure, which
+happens after the limiter has already admitted the request. This is a local
+three-replica check, not a load test and not the Fly deployment.
 
 ## Slack
 

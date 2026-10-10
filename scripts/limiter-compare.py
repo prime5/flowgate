@@ -56,13 +56,16 @@ def main():
     elapsed = time.monotonic() - start
 
     c = collections.Counter(codes)
-    ok = c.get(200, 0)
+    # Admitted = got past the limiter. The demo backend fails ~2% of requests
+    # with a 500 after the limiter has already spent a token, so counting only
+    # 200s would undercount. 429 is the limiter refusing, 503 the shedder.
+    ok = sum(n for code, n in c.items() if code not in (0, 429, 503))
     one_bucket = a.burst + a.rate * elapsed
     print(f"url={a.url} key={a.ip} requests={a.n} elapsed={elapsed:.2f}s")
     print("status counts:", dict(sorted(c.items())))
     if c.get(0):
         print(f"WARNING: {c[0]} transport failures; the counts below are not trustworthy")
-    print(f"admitted (200): {ok}")
+    print(f"admitted (not 429/503): {ok}")
     print(f"most ONE bucket could admit in {elapsed:.2f}s "
           f"(burst {a.burst:g} + {a.rate:g}/s): {one_bucket:.0f}")
     print(f"ratio admitted / one-bucket ceiling: {ok / one_bucket:.2f}")
