@@ -288,3 +288,11 @@ Verified against a real workspace through a Cloudflare quick tunnel:
 `/flowgate status`, and `/flowgate run latency 0.2 5` (acknowledged in the
 channel, verdict delivered afterwards through Slack's `response_url`). Socket
 Mode must be off in the app settings, otherwise Slack never calls the Request URL.
+
+Alerts were also verified against the same workspace (2026-10-09). With
+`BREAKER_THRESHOLD=1`, the breaker opening posted `[ALERT] ... OPEN` and
+afterwards `[RECOVERED]`. With a local Redis (`REDIS_ADDR`) stopped
+mid-run, requests kept returning 200 and one `[ALERT] ... failing open` message
+arrived. Alerts for the same condition are throttled, so the count in a message
+is the count at the first check; the cumulative total is the metric
+`flowgate_limiter_fail_open_total`.
