@@ -136,6 +136,41 @@ safety, so the race detector isn't optional):
 go test ./... -race
 ```
 
+## Proxy mode: protecting a real service
+
+By default `/work` runs against a simulated backend. With `UPSTREAM_URL` set,
+every path flowgate does not own (`/work`, `/metrics`, `/healthz`, `/sync*`,
+`/query`, `/scale` and `/experiments/*` stay local) is forwarded to a real
+service through the same shed -> rate-limit -> breaker chain.
+
+```bash
+UPSTREAM_URL=http://127.0.0.1:8000 \
+JWT_SECRET=<the upstream's HS256 secret> \
+RL_BURST=20 RL_RATE=5 ./flowgate
+```
+
+- **Failure mapping.** An unreachable upstream answers 502 and a slow one 504
+  (`UPSTREAM_TIMEOUT_MS`, default 5000). Both count as breaker failures, so a
+  dead upstream trips the breaker and later requests fail fast with 503.
+- **Trace context.** The W3C `traceparent` of the backend span is injected on
+  the upstream request, so the upstream receives the same trace id flowgate
+  returns in `X-Trace-Id`. Whether the upstream records spans is up to it.
+- **Identity keys.** With `JWT_SECRET` set, a valid, unexpired HS256 bearer
+  token is limited per `sub`; anything else (no token, bad signature, expired,
+  other algorithm, tampered payload) falls back to the client-address key.
+  An unverified claim is never used as a key, for the same reason as the
+  `Fly-Client-IP` rule above: otherwise editing a token would mint a fresh
+  bucket per request. This is fairness, not authentication. flowgate does not
+  reject on a bad token, and the upstream still authenticates for itself.
+- **Retry-After** is whole seconds, as HTTP requires.
+
+Verified with the aiops-triage-agent FastAPI service behind it: a real
+token got its own bucket (5 of 8 calls allowed at burst 5, a second identity
+from the same IP unaffected), forged tokens shared the IP bucket, and the
+console rendered the real 429 with its `Retry-After` countdown. The identity
+keys are not yet covered by the k6 load test, and the Redis-shared limiter
+has not been combined with identity keys in a deployed run.
+
 ## Deployed and load-tested
 
 - **Deploy (Fly.io)** — live at `https://flowgate-pramathesh.fly.dev`
