@@ -180,6 +180,12 @@ has not been combined with identity keys in a deployed run.
   264,971 succeeded, 33,322 shed (503, ~11%), 5,468 backend errors (~1.8%,
   matches the intentional simulated rate), **0 rate-limited (429)** — see
   `POSTMORTEM.md` for why, and the SLOs below for what this run established.
+- **Rate-limit re-run (k6)** — `loadtest.js` against the live deployment on 2026-10-27, after the
+  client-key fix (`TRUST_FLY_CLIENT_IP`). Fly's edge overwrites `Fly-Client-IP`, so every VU arrived
+  as one client: 747 allowed (4.98 req/s against a 5 req/s limit), 439,032 rate-limited, 22 simulated
+  backend errors. The script's `flowgate_200_total > 10000` threshold fails by design here; it
+  assumes distinct client keys, which only the local compose lab can supply. Latency in this run is
+  mostly the cost of a 429, so the 2026-09-11 run remains the latency evidence.
 
 ## SLOs (defined from the 2026-09-11 k6 run, not from theory)
 
@@ -189,9 +195,9 @@ has not been combined with identity keys in a deployed run.
 | Gateway responds to every request (no timeout/reset) | 100% | 100% | Met |
 | Backend success rate for admitted (non-shed) requests | ≥ 95% | 97.98% | Met |
 | Load shedding engages before the gateway itself degrades | shed, don't queue, above 50 in-flight | ~11% shed, latency stayed flat | Met |
-| Per-client rate limit enforced (5 req/s sustained) | 429s appear for over-limit clients | 0 429s in 303,761 requests | **Not met** — see `POSTMORTEM.md` |
+| Per-client rate limit enforced (5 req/s sustained) | 429s appear for over-limit clients | 2026-10-27: one client held to 4.98 req/s; 439,032 of 439,801 requests 429 | Met (single client) |
 
-## Resilience experiments (`resilience-experiments` branch)
+## Resilience experiments
 
 A fault-injection playground on top of the gateway, shaped by three
 real systems from my background. Every experiment has a steady
@@ -200,10 +206,8 @@ state, one fault, a blast radius, and a rollback — see
 
 - **Directory sync as a resizable worker pool** (`internal/pool`,
   `POST /sync`, `GET /sync/status`, `POST /scale?replicas=N`).
-  Workers are pods; scaling is `kubectl scale`. Under-provision it
-  and the backlog grows until batches miss their window — the
-  Cloud Identity Engine pod-capacity incident, reproducible on
-  demand. Scaling back up drains it; `deploy/k8s/hpa.yaml`
+  Workers are goroutines in-process; deploy/k8s runs the same shape against real pods, where scaling is kubectl scale. Under-provision it
+  and the backlog grows until batches miss their window — modelled on the Cloud Identity Engine pod-capacity incident. Scaling back up drains it; `deploy/k8s/hpa.yaml`
   automates the fix.
 - **MPP fan-out query** (`internal/fanout`, `GET /query`): scatter
   work across shards, gather results. Fault primitives are a
@@ -225,11 +229,11 @@ state, one fault, a blast radius, and a rollback — see
 
 ## What's prepared but NOT yet done
 
-- **Fix the rate limiter's client-key derivation** — it currently keys on
-  `r.RemoteAddr`, which doesn't reliably identify the real client behind
-  Fly.io's proxy layer. `POSTMORTEM.md` has the root cause and the fix
-  (key on the `Fly-Client-IP` header, falling back to `RemoteAddr`), plus a
-  re-run to confirm 429s show up once it's fixed.
+- Per-client limiting with many distinct clients on the live deployment. One laptop presents one
+  source IP at Fly's edge, so this needs traffic from many real addresses; the local three-replica
+  lab is the current evidence.
+- Cover identity keys in the k6 load test, and run the Redis-shared limiter with identity keys in a
+  deployed environment.
 
 ## Design notes
 
