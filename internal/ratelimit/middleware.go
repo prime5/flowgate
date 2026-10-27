@@ -8,6 +8,7 @@ package ratelimit
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -184,12 +185,16 @@ func breakerStateValue(s breaker.State) float64 {
 	}
 }
 
+// formatSeconds renders a wait as the delta-seconds form HTTP requires
+// for Retry-After (RFC 9110 section 10.2.3): a non-negative integer,
+// rounded up, never below 1. A Go duration string such as "1s" is not
+// valid there and breaks clients that parse the header as a number.
 func formatSeconds(d time.Duration) string {
-	secs := int(d.Seconds())
+	secs := int((d + time.Second - 1) / time.Second)
 	if secs < 1 {
 		secs = 1
 	}
-	return time.Duration(secs * int(time.Second)).String()
+	return strconv.Itoa(secs)
 }
 
 // statusRecorder captures the status code the handler actually wrote,
