@@ -36,6 +36,7 @@ import (
 	"github.com/prime5/flowgate/internal/limiter"
 	"github.com/prime5/flowgate/internal/metrics"
 	"github.com/prime5/flowgate/internal/pool"
+	"github.com/prime5/flowgate/internal/proxy"
 	"github.com/prime5/flowgate/internal/ratelimit"
 	"github.com/prime5/flowgate/internal/shedder"
 	"github.com/prime5/flowgate/internal/telemetry"
@@ -141,6 +142,22 @@ func main() {
 		fault.Latency(envDur("FAULT_LATENCY_MS", 250), fault.Always()),
 	)
 	mux.Handle("/work", ratelimit.Wrap(cfg, fault.Middleware(backendFault)(backend)))
+
+	// Proxy mode: with UPSTREAM_URL set, every path flowgate does not
+	// own (/work, /metrics, /healthz, /sync*, /query, /scale and
+	// /experiments/* stay local) is forwarded to that service through
+	// the same shed -> ratelimit -> breaker chain. The upstream sees the
+	// caller's Authorization header unchanged and joins flowgate's trace.
+	if raw := os.Getenv("UPSTREAM_URL"); raw != "" {
+		upstream, err := url.Parse(raw)
+		if err != nil || upstream.Scheme == "" || upstream.Host == "" {
+			log.Fatalf("UPSTREAM_URL %q is not an absolute URL", raw)
+		}
+		mux.Handle("/", ratelimit.Wrap(cfg, proxy.New(upstream, proxy.Options{
+			ResponseHeaderTimeout: envDur("UPSTREAM_TIMEOUT_MS", 5000),
+		})))
+		log.Printf("proxy mode: forwarding unmatched paths to %s", upstream.Redacted())
+	}
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		metrics.SyncQueueDepth.Set(float64(syncPool.Stats().Queued))
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
