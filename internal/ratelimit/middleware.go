@@ -58,6 +58,13 @@ func keyFuncFor(trustFlyHeader bool) func(*http.Request) string {
 	}
 }
 
+// DefaultKeyFunc is the address-based key function Wrap uses when
+// Config.KeyFunc is nil, exported so other key functions (such as the
+// identity-based one) can fall back to it.
+func DefaultKeyFunc(trustFlyHeader bool) func(*http.Request) string {
+	return keyFuncFor(trustFlyHeader)
+}
+
 // Wrap returns next wrapped with load shedding, per-key rate limiting
 // and circuit breaking, in that order, each instrumented with metrics
 // and with a trace span.

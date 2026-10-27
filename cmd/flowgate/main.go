@@ -33,6 +33,7 @@ import (
 	"github.com/prime5/flowgate/internal/exp"
 	"github.com/prime5/flowgate/internal/fanout"
 	"github.com/prime5/flowgate/internal/fault"
+	"github.com/prime5/flowgate/internal/identity"
 	"github.com/prime5/flowgate/internal/limiter"
 	"github.com/prime5/flowgate/internal/metrics"
 	"github.com/prime5/flowgate/internal/pool"
@@ -93,6 +94,15 @@ func main() {
 		TrustFlyClientIP: os.Getenv("TRUST_FLY_CLIENT_IP") == "1",
 		Breaker:          breaker.New(envInt("BREAKER_THRESHOLD", 5), 10*time.Second),
 		Shedder:          shedder.New(envInt("MAX_IN_FLIGHT", 50)),
+	}
+
+	// Identity-aware keys: with JWT_SECRET set (the same HS256 secret the
+	// upstream signs with), requests carrying a valid, unexpired bearer
+	// token are limited per token subject; everything else keeps the
+	// address key. Unverified claims are never used as keys.
+	if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		cfg.KeyFunc = identity.KeyFunc([]byte(secret), ratelimit.DefaultKeyFunc(cfg.TrustFlyClientIP), nil)
+		log.Printf("rate-limit keys: verified JWT subject, falling back to client address")
 	}
 
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
